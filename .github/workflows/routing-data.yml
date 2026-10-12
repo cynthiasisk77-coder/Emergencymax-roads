@@ -1,0 +1,74 @@
+name: Build offline directions data
+
+# Runs when tools/routing changes on main, or by hand. For every state
+# in tools/routing/states.txt it downloads the OpenStreetMap extract from
+# Geofabrik (ODbL), keeps the roads, and builds the two files the app routes
+# over with no signal: <slug>-main.bin (main roads) and <slug>-local.bin
+# (every neighborhood street, in squares). They are attached to the GitHub
+# release named in ROUTES_RELEASE, where the app downloads them.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main']
+    paths: ['tools/routing/**', '.github/workflows/routing-data.yml']
+
+permissions:
+  contents: write
+
+env:
+  ROUTES_RELEASE: routes-v2
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      states: ${{ steps.list.outputs.states }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          echo "states=$(awk 'NF{print $1}' tools/routing/states.txt | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+      - name: Make sure the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$ROUTES_RELEASE" >/dev/null 2>&1 || gh release create "$ROUTES_RELEASE" --title "Offline directions road data" --notes "Road files for offline directions, built from OpenStreetMap (© OpenStreetMap contributors, ODbL) by tools/routing/build_graph.py." --target "$GITHUB_SHA"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        state: ${{ fromJson(needs.plan.outputs.states) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q osmium-tool
+          pip install -q osmium
+      - name: Build
+        run: |
+          slug="${{ matrix.state }}"
+          name="$(awk -v s="$slug" '$1==s{ $1=""; sub(/^ /,""); print }' tools/routing/states.txt)"
+          mkdir -p out work
+          curl -fsSL --retry 5 --retry-delay 20 -o work/$slug.osm.pbf "https://download.geofabrik.de/north-america/us/$slug-latest.osm.pbf"
+          osmium tags-filter work/$slug.osm.pbf w/highway=motorway,motorway_link,trunk,trunk_link,primary,primary_link,secondary,secondary_link,tertiary,tertiary_link,unclassified,residential,living_street,road -o work/roads.osm.pbf --overwrite
+          rm -f work/$slug.osm.pbf
+          /usr/bin/time -v python tools/routing/build_graph.py work/roads.osm.pbf out/$slug "$name" 2> out/$slug-time.txt | tee out/$slug-log.txt
+          ls -la out | tee -a out/$slug-log.txt
+      - name: Upload
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          slug="${{ matrix.state }}"
+          tail -n 30 out/$slug-time.txt >> out/$slug-log.txt 2>/dev/null || true
+          files="out/$slug-log.txt"
+          [ -f out/$slug-main.bin ] && files="$files out/$slug-main.bin"
+          [ -f out/$slug-local.bin ] && files="$files out/$slug-local.bin"
+          gh release upload "$ROUTES_RELEASE" $files --clobber

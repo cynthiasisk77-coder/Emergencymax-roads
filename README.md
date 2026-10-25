@@ -10,6 +10,12 @@ They are built from OpenStreetMap by `tools/routing/build_graph.py` and attached
 to the `routes-v2` release. The app downloads the states it needs and finds the
 way on the phone, with no signal.
 
+Map files, one per state, are built the same way by `.github/workflows/map-tiles.yml`
+(Planetiler, OpenMapTiles schema, zoom 0 to 14, PMTiles) and attached to the
+`tiles-v1` release, with `tiles.json` listing every file and its size. The app
+downloads a whole state as one file, so the download carries on after the app
+is closed.
+
 This repository holds map data only. It contains no app code and nothing personal.
 
 ## Data and license

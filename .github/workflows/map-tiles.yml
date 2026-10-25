@@ -1,0 +1,91 @@
+name: Build offline map files
+
+# One map file per state, so a phone downloads a whole state in one go and
+# keeps downloading after the app is closed (Cynthia, 24 October 2026:
+# "nobody is going to keep their app open for that long"). For every state in
+# tools/routing/states.txt it downloads the OpenStreetMap extract from
+# Geofabrik (ODbL) and runs Planetiler (OpenMapTiles schema, zoom 0 to 14)
+# into <slug>.pmtiles. The files are attached to the release named in
+# TILES_RELEASE, with tiles.json listing every file and its size. Runs when
+# this file changes on main, or by hand.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/map-tiles.yml']
+
+permissions:
+  contents: write
+
+env:
+  TILES_RELEASE: tiles-v1
+  PLANETILER: https://github.com/onthegomap/planetiler/releases/download/v0.9.1/planetiler.jar
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      states: ${{ steps.list.outputs.states }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          echo "states=$(awk 'NF{print $1}' tools/routing/states.txt | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+      - name: Make sure the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TILES_RELEASE" >/dev/null 2>&1 || gh release create "$TILES_RELEASE" --title "Offline map files" --notes "One map file per state (PMTiles, OpenMapTiles schema, zoom 0 to 14), built from OpenStreetMap (© OpenStreetMap contributors, ODbL) with Planetiler. Water from OSM coastlines; low-zoom land from Natural Earth (public domain)." --target "$GITHUB_SHA"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        state: ${{ fromJson(needs.plan.outputs.states) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The shared sources (water polygons, Natural Earth, lake centrelines)
+      # are about 1.5 GB; cached once and reused by every state.
+      - uses: actions/cache@v4
+        with:
+          path: data/sources
+          key: planetiler-sources-v1
+      - name: Build
+        run: |
+          slug="${{ matrix.state }}"
+          mkdir -p out work data/sources
+          curl -fsSL --retry 5 --retry-delay 20 -o planetiler.jar "$PLANETILER"
+          curl -fsSL --retry 5 --retry-delay 20 -o work/$slug.osm.pbf "https://download.geofabrik.de/north-america/us/$slug-latest.osm.pbf"
+          java -Xmx10g -jar planetiler.jar --download --osm-path=work/$slug.osm.pbf --output=out/$slug.pmtiles --force --maxzoom=14 --nodemap-type=sparsearray --storage=mmap 2>&1 | tee out/$slug-tiles-log.txt
+          ls -la out | tee -a out/$slug-tiles-log.txt
+      - name: Upload
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          slug="${{ matrix.state }}"
+          files="out/$slug-tiles-log.txt"
+          [ -f out/$slug.pmtiles ] && files="$files out/$slug.pmtiles"
+          gh release upload "$TILES_RELEASE" $files --clobber
+
+  list:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write tiles.json with every file and its size
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TILES_RELEASE" --repo "$GITHUB_REPOSITORY" --json assets --jq '{built: (now | todate), files: [.assets[] | select(.name | endswith(".pmtiles")) | {slug: (.name | sub("\\.pmtiles$"; "")), bytes: .size, updated: .updatedAt}]}' > tiles.json
+          cat tiles.json
+          gh release upload "$TILES_RELEASE" tiles.json --clobber

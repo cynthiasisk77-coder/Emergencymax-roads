@@ -9,11 +9,9 @@ name: Build offline map files
 # TILES_RELEASE, with tiles.json listing every file and its size. Runs when
 # this file changes on main, or by hand.
 
+# By hand only: a run rebuilds every state (about 40 minutes of runners).
 on:
   workflow_dispatch:
-  push:
-    branches: ['main']
-    paths: ['.github/workflows/map-tiles.yml']
 
 permissions:
   contents: write
@@ -88,4 +86,4 @@ jobs:
         run: |
           gh release view "$TILES_RELEASE" --repo "$GITHUB_REPOSITORY" --json assets --jq '{built: (now | todate), files: [.assets[] | select(.name | endswith(".pmtiles")) | {slug: (.name | sub("\\.pmtiles$"; "")), bytes: .size, updated: .updatedAt}]}' > tiles.json
           cat tiles.json
-          gh release upload "$TILES_RELEASE" tiles.json --clobber
+          gh release upload "$TILES_RELEASE" tiles.json --clobber --repo "$GITHUB_REPOSITORY"

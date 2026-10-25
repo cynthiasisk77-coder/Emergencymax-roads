@@ -1,0 +1,28 @@
+name: List the offline map files
+
+# Writes tiles.json (every state file and its size) to the tiles-v1 release
+# without rebuilding anything. Runs by hand, or when this file changes.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/map-tiles-list.yml']
+
+permissions:
+  contents: write
+
+env:
+  TILES_RELEASE: tiles-v1
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write tiles.json with every file and its size
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TILES_RELEASE" --repo "$GITHUB_REPOSITORY" --json assets --jq '{built: (now | todate), files: [.assets[] | select(.name | endswith(".pmtiles")) | {slug: (.name | sub("\\.pmtiles$"; "")), bytes: .size, updated: .updatedAt}]}' > tiles.json
+          cat tiles.json
+          gh release upload "$TILES_RELEASE" tiles.json --clobber --repo "$GITHUB_REPOSITORY"
